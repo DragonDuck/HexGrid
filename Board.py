@@ -22,6 +22,19 @@ class BaseHexField(object):
     __neighbor_directions__ = {
         "topleft", "topright", "bottomleft", "bottomright", "left", "right"}
 
+    __direction_adjustment__ = {
+        "topleft":    (0, -1), "topright":    (1, -1),
+        "left":       (-1, 0), "right":       (1,  0),
+        "bottomleft": (-1, 1), "bottomright": (0,  1)}
+
+    __opposite_direction__ = {
+        "topleft":      "bottomright",
+        "topright":     "bottomleft",
+        "left":         "right",
+        "right":        "left",
+        "bottomleft":   "topright",
+        "bottomright":  "topleft"}
+
     def __init__(self, *, coords=None, neighbors=None):
         """
         Creates a single hexagonal tile
@@ -30,19 +43,25 @@ class BaseHexField(object):
             direction of neighboring field: "topleft", "topright", "left",
             "right", "bottomleft", "bottomright". A value of None indicates
             that there is no neighbor in this direction, e.g. board edge.
+            Note that ONLY dictionary entries with one of the direction names
+            as keys will be considered. Missing directions will be set to
+            NoneType and additional keys will be ignored
         """
         self._coords = coords if coords is not None else []
 
-        try:
+        if neighbors is not None:
+            self._neighbors = {}
+            for key in BaseHexField.__neighbor_directions__:
+                if key in neighbors.keys():
+                    self._neighbors[key] = neighbors[key]
+                else:
+                    self._neighbors[key] = None
+        else:
             self._neighbors = {
-                key: neighbors[key] for key in BaseHexField.__neighbor_directions__} \
-                if neighbors is not None else {
                 key: None for key in BaseHexField.__neighbor_directions__}
-        except KeyError:
-            raise ValueError(
-                "If not None, 'neighbors' must be a dictionary with all of "
-                "the following keys: {}".format(
-                    str(BaseHexField.__neighbor_directions__)))
+
+    def __repr__(self):
+        return "<Coords: {}>".format(str(self._coords))
 
     def get_coords(self):
         return self._coords
@@ -53,8 +72,17 @@ class BaseHexField(object):
     def get_neighbors(self):
         return self._neighbors
 
+    def set_neighbor(self, direction, neighbor):
+        if direction in BaseHexField.__neighbor_directions__:
+            self._neighbors[direction] = neighbor
+        else:
+            raise ValueError("'direction' must be one of {}".format(
+                str(BaseHexField.__neighbor_directions__)))
+
     def set_neighbors(self, neighbors):
-        self._neighbors = neighbors
+        for key in neighbors.keys():
+            if key in BaseHexField.__neighbor_directions__:
+                self._neighbors[key] = neighbors[key]
 
     def get_neighbor(self, direction):
         try:
@@ -62,6 +90,18 @@ class BaseHexField(object):
         except KeyError:
             raise ValueError("'direction must be one of {}".format(
                 str(BaseHexField.__neighbor_directions__)))
+
+    @staticmethod
+    def get_directions():
+        return BaseHexField.__neighbor_directions__
+
+    @staticmethod
+    def get_direction_adjustment(direction):
+        return BaseHexField.__direction_adjustment__[direction]
+
+    @staticmethod
+    def get_opposite_direction(direction):
+        return BaseHexField.__opposite_direction__[direction]
 
 
 class ValueHexField(BaseHexField):
@@ -75,6 +115,9 @@ class ValueHexField(BaseHexField):
         """
         self._value = value if value is not None else None
         super().__init__(coords=coords, neighbors=neighbors)
+
+    def __repr__(self):
+        return "<Coords: {}, Value: {}>".format(str(self._coords), str(self._value))
 
     def get_value(self):
         return self._value
@@ -127,11 +170,12 @@ class HexBoard(object):
 
         The value of each field is determined by its position along the radius,
         i.e. fields at the edge have a value of 1 and the value increases by 1
-        with each inner layer. The center of a hexagon with a radius of 3 will
-        therefore have a value of 4.
+        with each inner layer. The center of a hexagon with a radius of N will
+        therefore have a value of N+1.
 
         :param radius: An integer indicating the number of fields that the board
-            should extend along each axis.
+            should extend along each axis. For example, a radius of 1 generates
+            a board consisting of a center hex field with 6 neighbors.
         :return:
         """
         if radius < 1:
@@ -139,23 +183,48 @@ class HexBoard(object):
 
         # TODO: Refactor to start building board from center and connecting neighbors during the building process
 
-        # Generate matrix
-        fields = []
-        for ii in range(0, 2*radius+1):
-            x = ii - radius
-            fields.append([])
-            for jj in range(0, 2*radius+1):
-                y = jj - radius
-                fields[ii].append(
-                    None if abs(x + y) <= radius else
-                    ValueHexField()
-                )
+        # Place center tile at 0, 0 with NULL neighbors
+        fields = [ValueHexField(value=radius+1, coords=(0, 0))]
 
+        # Place concentric rings 'radius' times
+        for r in range(1, radius+1):
+            new_field_ring = []
+            # Loop through all existing fields at a boundary, i.e. with NULL
+            # neighbors
+            for field in fields:
+                for direction in ValueHexField.get_directions():
+                    if field.get_neighbor(direction=direction) is None:
+                        new_coords = tuple(sum(x) for x in zip(
+                            field.get_coords(),
+                            ValueHexField.get_direction_adjustment(direction)))
+                        new_field = ValueHexField(
+                            value=radius+1-r, coords=new_coords,
+                            neighbors={ValueHexField.get_opposite_direction(
+                                direction=direction): field})
+                        field.set_neighbor(direction=direction, neighbor=new_field)
+                        new_field_ring.append(new_field)
 
-        for x in range(-radius, radius+1):
-            fields.append([])
-            for y in range(-radius, radius+1):
-                if abs(x + y) <= radius:
-                    continue
+            fields += new_field_ring
 
+        # Go through all fields again and consolidate duplicate entries by
+        # combining their neighbors. Because the code generates the board from
+        # the center outwards, this ensures that all neighbors are properly
+        # connected.
+        final_fields = []
+        for field in fields:
+            coords = field.get_coords()
+            existing_field = [f for f in final_fields if f.get_coords() == coords]
+            # If no field at those coordinates exist, add it.
+            if len(existing_field) == 0:
+                final_fields.append(field)
+            # Otherwise, update the neigbors
+            elif len(existing_field) == 1:
+                for direction, neighbor in field.get_neighbors().items():
+                    if existing_field[0].get_neighbor(direction) is None:
+                        existing_field[0].set_neighbor(
+                            direction=direction, neighbor=neighbor)
+            # TODO: This is only for testing. Delete after code is tested thoroughly.
+            else:
+                raise RuntimeError("Catastrophic error during board creation (A01)")
 
+        return cls(fields=final_fields)
